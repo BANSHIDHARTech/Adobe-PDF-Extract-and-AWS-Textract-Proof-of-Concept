@@ -1,0 +1,3 @@
+pdfservices-sdk
+boto3
+python-dotenv
