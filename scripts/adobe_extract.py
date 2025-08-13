@@ -53,31 +53,51 @@ def run(input_pdf, creds_path, output_json):
         elif 'project' in creds_data:
             # Project-based format from Adobe Developer Console
             project = creds_data['project']
-            if 'credentials' in project:
-                creds = project['credentials']
-                if isinstance(creds, list) and len(creds) > 0:
+            if 'workspace' in project and 'details' in project['workspace']:
+                details = project['workspace']['details']
+                if 'credentials' in details and isinstance(details['credentials'], list) and len(details['credentials']) > 0:
                     # Take first credential set
-                    first_cred = creds[0]
-                    if 'jwt' in first_cred:
+                    first_cred = details['credentials'][0]
+                    if 'oauth_server_to_server' in first_cred:
+                        oauth_creds = first_cred['oauth_server_to_server']
+                        client_id = oauth_creds.get('client_id')
+                        # client_secrets is an array, take the first one
+                        client_secrets = oauth_creds.get('client_secrets', [])
+                        client_secret = client_secrets[0] if client_secrets else None
+                    elif 'jwt' in first_cred:
                         jwt_creds = first_cred['jwt']
                         client_id = jwt_creds.get('client_id')
                         client_secret = jwt_creds.get('client_secret')
-                    elif 'oauth_server_to_server' in first_cred:
-                        oauth_creds = first_cred['oauth_server_to_server']
-                        client_id = oauth_creds.get('client_id')
-                        client_secret = oauth_creds.get('client_secret')
                     else:
                         # Look for client_id/client_secret directly in credential
                         client_id = first_cred.get('client_id')
                         client_secret = first_cred.get('client_secret')
                 else:
-                    # credentials is not a list, try direct access
-                    client_id = project['credentials'].get('client_id')
-                    client_secret = project['credentials'].get('client_secret')
-            else:
-                # Look for client_id/client_secret directly in project
-                client_id = project.get('client_id')
-                client_secret = project.get('client_secret')
+                    # Fallback: try direct access in project
+                    if 'credentials' in project:
+                        creds = project['credentials']
+                        if isinstance(creds, list) and len(creds) > 0:
+                            first_cred = creds[0]
+                            if 'jwt' in first_cred:
+                                jwt_creds = first_cred['jwt']
+                                client_id = jwt_creds.get('client_id')
+                                client_secret = jwt_creds.get('client_secret')
+                            elif 'oauth_server_to_server' in first_cred:
+                                oauth_creds = first_cred['oauth_server_to_server']
+                                client_id = oauth_creds.get('client_id')
+                                client_secrets = oauth_creds.get('client_secrets', [])
+                                client_secret = client_secrets[0] if client_secrets else None
+                            else:
+                                client_id = first_cred.get('client_id')
+                                client_secret = first_cred.get('client_secret')
+                        else:
+                            # credentials is not a list, try direct access
+                            client_id = project['credentials'].get('client_id')
+                            client_secret = project['credentials'].get('client_secret')
+                    else:
+                        # Look for client_id/client_secret directly in project
+                        client_id = project.get('client_id')
+                        client_secret = project.get('client_secret')
         elif 'client_id' in creds_data:
             # Direct format
             client_id = creds_data['client_id']
@@ -100,7 +120,13 @@ def run(input_pdf, creds_path, output_json):
             else:
                 raise ValueError("Could not find client_id and client_secret in credentials file")
         
+        # Validate that we have valid credentials
+        if not client_id or not client_secret:
+            raise ValueError(f"Invalid credentials: client_id={client_id}, client_secret={'*' * len(client_secret) if client_secret else 'None'}")
+        
         logger.info(f"Using client_id: {client_id[:8]}...")
+        logger.info(f"Using client_secret: {'*' * min(8, len(client_secret))}...")
+        
         credentials = ServicePrincipalCredentials(
             client_id=client_id,
             client_secret=client_secret
@@ -116,11 +142,13 @@ def run(input_pdf, creds_path, output_json):
         
         input_asset = pdf_services.upload(input_stream=input_stream, mime_type=PDFServicesMediaType.PDF)
         
-        # Create extract parameters
-        logger.info("Configuring extraction parameters with character bounding boxes")
+        # Create extract parameters - extract comprehensive data with supported element types
+        logger.info("Configuring extraction parameters for comprehensive text and positional data")
         extract_pdf_params = ExtractPDFParams(
-            elements_to_extract=[ExtractElementType.TEXT, ExtractElementType.TABLES],
-            get_char_info=True
+            elements_to_extract=[
+                ExtractElementType.TEXT,           # All text elements with positions
+                ExtractElementType.TABLES          # Table structures
+            ]
         )
         
         # Create extract job
@@ -154,11 +182,28 @@ def run(input_pdf, creds_path, output_json):
             with z.open(json_name) as f:
                 data = json.load(f)
             
+            # Log extraction summary
+            if 'elements' in data:
+                element_types = {}
+                for element in data['elements']:
+                    if 'Path' in element:
+                        path = element['Path']
+                        element_type = path.split('/')[-1] if '/' in path else 'Unknown'
+                        element_types[element_type] = element_types.get(element_type, 0) + 1
+                
+                logger.info("📊 Extraction Summary:")
+                for elem_type, count in element_types.items():
+                    logger.info(f"   {elem_type}: {count} elements")
+                
+                if 'extended_metadata' in data and 'page_count' in data['extended_metadata']:
+                    logger.info(f"   Total Pages: {data['extended_metadata']['page_count']}")
+            
             # Save extracted JSON
             with open(output_json, 'w', encoding='utf-8') as out:
                 json.dump(data, out, indent=2)
         
         logger.info(f"✅ Adobe extraction completed successfully. Results saved to: {output_json}")
+        logger.info(f"📁 Full results also saved to: {result_zip}")
         return 0
         
     except Exception as e:
